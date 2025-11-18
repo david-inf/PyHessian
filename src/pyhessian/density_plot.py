@@ -18,23 +18,30 @@
 # along with PyHessian.  If not, see <http://www.gnu.org/licenses/>.
 #*
 
-import math
 import numpy as np
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
 
 
-def get_esd_plot(eigenvalues, weights):
+def plot_eigenvalue_density(eigenvalues, weights, ax=None):
+    """Plot eigenvalue spectral density on a given matplotlib Axes.
+    If ax is None, uses the current axes (plt.gca())."""
     density, grids = density_generate(eigenvalues, weights)
-    plt.semilogy(grids, density + 1.0e-7)
-    plt.ylabel('Density (Log Scale)', fontsize=14, labelpad=10)
-    plt.xlabel('Eigenvlaue', fontsize=14, labelpad=10)
-    plt.xticks(fontsize=12)
-    plt.yticks(fontsize=12)
-    plt.axis([np.min(eigenvalues) - 1, np.max(eigenvalues) + 1, None, None])
-    plt.tight_layout()
-    plt.savefig('example.pdf')
+    if ax is None:
+        ax = plt.gca()
+
+    ax.semilogy(grids, density + 1.0e-7)
+    ax.set_ylabel('Density (Log Scale)', fontsize=14, labelpad=10)
+    ax.set_xlabel('Eigenvalue', fontsize=14, labelpad=10)
+    ax.tick_params(axis='both', which='major', labelsize=12)
+
+    # Determine sensible x-limits from the provided eigenvalues array
+    eig_min = np.min(eigenvalues)
+    eig_max = np.max(eigenvalues)
+    ax.set_xlim(eig_min - 1, eig_max + 1)
+
+    return ax
 
 
 def density_generate(eigenvalues,

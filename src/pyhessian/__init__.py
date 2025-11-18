@@ -18,9 +18,13 @@
 # along with PyHessian.  If not, see <http://www.gnu.org/licenses/>.
 #*
 
-import argparse
-import importlib
-import os
+from .utils import group_product as group_product
+from .utils import group_add as group_add
+from .utils import normalization as normalization
+from .utils import get_params_grad as get_params_grad
+from .utils import hessian_vector_product as hessian_vector_product
+from .utils import orthnormal as orthnormal
 
-from .utils import group_product, group_add, normalization, get_params_grad, hessian_vector_product, orthnormal
-from .hessian import hessian
+from .hessian import Hessian as Hessian
+
+from .density_plot import plot_eigenvalue_density as plot_eigenvalue_density
