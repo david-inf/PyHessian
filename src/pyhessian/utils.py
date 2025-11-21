@@ -20,10 +20,39 @@
 
 """Utility functions for Hessian computation in neural networks."""
 
-from typing import Tuple, List
+import time
+from typing import Tuple, List, Dict, Union, TYPE_CHECKING
 import torch
 from torch import nn
 from torch import Tensor
+
+if TYPE_CHECKING:
+    from .hessian import Hessian
+
+import logging
+from rich.logging import RichHandler
+from rich.console import Console
+from rich.theme import Theme
+
+# Configure logging
+monitor_theme = Theme({
+    "info": "dim cyan",
+    "warning": "magenta",
+    "error": "bold red",
+})
+console = Console(theme=monitor_theme)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    # datefmt='[%X]',
+    handlers=[RichHandler(
+        console=console,
+        rich_tracebacks=True,
+    )],
+)
+
+LOG = logging.getLogger("rich")
 
 
 def group_product(xs: List[Tensor], ys: List[Tensor]) -> Tensor:
@@ -204,3 +233,70 @@ def orthnormal(w: List[Tensor], v_list: List[List[Tensor]]) -> List[Tensor]:
         w = group_add(w, v, alpha=-group_product(w, v))
     # Normalize the resulting orthogonal vector
     return normalization(w)
+
+
+def map_param_to_block_name(param_idx: int, hessian_comp: "Hessian") -> Dict[str, Union[str, List[int]]]:
+    """
+    Given a parameter index, returns back the name of its param block.
+    
+    This function iterates through the model's named parameters and constructs
+    a dict that maps each parameter index to its block name (layer/module name).
+    This is useful for interpreting Hessian computations in terms of model structure.
+    
+    Args:
+        param_idx: The parameter index
+        hessian_comp: An instance of the Hessian class containing the model
+        
+    Returns:
+        A dict containing the block name and the corresponding parameter index range.
+    """
+    out = {}  # output
+    param_offset = 0  # counter for param block ranges
+    for p_name, p in hessian_comp.model.named_parameters():
+        # Cycle over param blocks and take the ones with gradient
+        if p.requires_grad:
+            numel = p.numel()  # number of params in the current block
+            if param_offset <= param_idx < param_offset + numel:
+                out['p_name'] = p_name
+                out['block_range'] = [param_offset, param_offset + numel]
+                break
+            param_offset += numel
+
+    if not out:
+        raise ValueError(f"Parameter index {param_idx} does not correspond to any parameter block.")
+
+    return out
+
+
+class AverageMeter:
+    """Computes and stores the average and current value"""
+
+    def __init__(self) -> None:
+        """Initialize the AverageMeter with default values."""
+        # store metric statistics
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all statistics to zero."""
+        # store metric statistics
+        self.val = 0  # value
+        self.sum = 0  # running sum
+        self.avg = 0  # running average
+        self.count = 0  # steps counter
+
+    def update(self, val: float, n: int = 1) -> None:
+        """Update statistics with new value.
+
+        Args:
+            val: The value to update with
+            n: Weight of the value (default: 1)
+        """
+        # update statistic with given new value
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+def convert_sec_to_hms(seconds):
+    return time.strftime("%H:%M:%S", time.gmtime(seconds))

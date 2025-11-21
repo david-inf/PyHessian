@@ -24,7 +24,10 @@ from .utils import normalization as normalization
 from .utils import get_params_grad as get_params_grad
 from .utils import hessian_vector_product as hessian_vector_product
 from .utils import orthnormal as orthnormal
+from .utils import map_param_to_block_name as map_param_to_block_name
 
 from .hessian import Hessian as Hessian
 
 from .density_plot import plot_eigenvalue_density as plot_eigenvalue_density
+from .hessian_plot import plot_hessian_heatmap as plot_hessian_heatmap
+from .hessian_plot import plot_hessian_sign as plot_hessian_sign
