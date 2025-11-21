@@ -1,11 +1,13 @@
 """Utilities for approximating the Hessian matrix of a nn.Module"""
 
 from .hessian import Hessian
-from .utils import AverageMeter, LOG, map_param_to_block_name, convert_sec_to_hms
+from .utils import (
+    AverageMeter, LOG, map_param_to_block_name, convert_sec_to_hms,
+    hessian_vector_product)
 
 import time
 from argparse import Namespace
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 import torch
 from torch import nn, Tensor
@@ -17,14 +19,14 @@ class HessianApproximator:
         self,
         opts: Namespace,
         hessian_comp: Hessian,
-        method: str = 'exact',
+        method_config: Dict[str, Any],
     ):
         if getattr(opts, "ckpt", None) is None:
             raise ValueError("Model checkpoint not found in opts.ckpt")
 
         self.model_ckpt = opts.ckpt
         self.hessian_comp = hessian_comp
-        self.method = method
+        self.method_config = method_config
 
         # Device handling logic
         try:
@@ -42,10 +44,19 @@ class HessianApproximator:
         """Run the Hessian matrix approximation."""
         start = time.time()
 
-        if self.method == "exact":
+        method = self.method_config.get("method", "exact")
+        LOG.info(f"Computing Hessian matrix with method {method}")
+        if method == "exact":
             self.hess_approx = self._exact_hessian()
+        elif method == "block-wise":
+            raise NotImplementedError()
+            self.hess_approx = self._block_wise_hessian()
+        elif method == "sampling":
+            step = self.method_config.get("step", 10)
+            LOG.info(f"Sampling every {step} parameters for Hessian approximation")
+            self.hess_approx = self._exact_hessian(step=step)
         else:
-            raise ValueError(f"Unknown Hessian approximation method {self.method}")
+            raise ValueError(f"Unknown Hessian approximation method {method}")
 
         if self.hess_approx is None:
             raise RuntimeError("Hessian approximation failed, no matrix computed.")
@@ -54,20 +65,52 @@ class HessianApproximator:
                  f"{convert_sec_to_hms(time.time() - start)}")
         return self.hess_approx
 
-    def _block_wise_hessian(self) -> Tensor:
+    def _block_wise_hessian(self) -> Dict[str, Tensor]:
         """Compute the Hessian matrix block-wise (for each param block in model)."""
-        raise NotImplementedError()
-
-    def _exact_hessian(self) -> Tensor:
-        """Compute the Hessian matrix for all the model parameters."""
         approx_start = time.time()
+        mean_comp_time = AverageMeter()
+
+        # Cycle over the param blocks (pytorch default partition)
+        blocks = self.hessian_comp.model.named_parameters()
+        hess_blocks: Dict[str, Tensor] = {}
+        p: nn.Parameter
+        for i, (p_name, p) in enumerate(blocks, 1):
+            # do the exact approch for each block
+            start = time.time()
+            # TODO: implement block-wise hessian
+            # block_hess_approx = self._exact_hessian([p])
+            # hess_blocks[p_name] = block_hess_approx
+            mean_comp_time.update(time.time() - start)
+
+            approx_runtime = time.time() - approx_start
+            LOG.info(f"{self.model_ckpt}: {p_name} [{i}/{len(blocks)}]"
+                     f"{mean_comp_time.avg:.2f}s per block"
+                     f"{convert_sec_to_hms(approx_runtime)} current runtime")
+
+        if hess_blocks is None:
+            raise RuntimeError("Block Hessian matrices dict is empty :(")
+
+        # TODO: otherwise a tensor with 1e-10 offdiagonal
+        return hess_blocks
+
+    def _exact_hessian(self, step: int = 1) -> Tensor:
+        """Compute the Hessian matrix for all the model parameters.
+        - If step is >1, will work as a sampling"""
+        approx_start = time.time()
+        log_every = self.method_config.get("log_every", 1000)
         n_params = sum(p.numel() for p in self.hessian_comp.model.parameters() if p.requires_grad)
 
-        mean_comp_time = AverageMeter()
+        LOG.info(f"Computing full Hessian for {n_params} parameters!")
+        LOG.info(f"This will require ~{(n_params**2 * 4) / (1024**3):.2f} GB of memory")
+
+        mean_comp_time = AverageMeter()  # store here the average computation time
         hess_cols: List[Tensor] = []     # store here the columns of the Hessian
         hess_cols_names: List[str] = []  # store here the names of the Hessian columns
 
-        for i in tqdm(range(n_params), desc="Hv prods", unit="dim", disable=True):
+        for i in tqdm(
+            range(0, n_params, step),
+            desc="Hv prods", unit="dim", disable=True
+        ):
             # Create i-th standard basis vector
             e_i = torch.zeros(n_params, device=self.device)
             e_i[i] = 1.0
@@ -93,30 +136,32 @@ class HessianApproximator:
 
             # Flatten the product so to have the column
             hv_prod_flat = torch.cat([h.flatten() for h in hv_prod])
+            # TODO: remove here based on step
+            hv_prod_flat = hv_prod_flat[0::step]
             hess_cols.append(hv_prod_flat)
 
             # Print status
-            if i % 1000 == 0:
+            if i % log_every == 0:
                 approx_runtime = time.time() - approx_start
-                LOG.info(f"{self.ckpt}: {i}/{n_params} columns, "
-                         f"{mean_comp_time.avg:.2f}s for Hv product, "
-                         f"{convert_sec_to_hms(approx_runtime)} total runtime")
+                LOG.info(f"{self.model_ckpt}: {i}/{n_params} columns, "
+                         f"{mean_comp_time.avg:.2f}s per Hv product, "
+                         f"{convert_sec_to_hms(approx_runtime)} current runtime")
                 mean_comp_time.reset()
 
         # Build the matrix
         H_approx = torch.stack(hess_cols, dim=1)
         return H_approx
 
-    def export_matrix(self, output_dir: Path) -> None:
+    def export_matrix(self, output_dir: Optional[Path] = Path("."), fname: Optional[str] = None) -> None:
         """Export the computed matrix to a .pt file."""
         if self.hess_approx is None:
             raise ValueError("No Hessian matrix found at self.hess_approx")
 
         LOG.debug(f"Checking directory {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
-        data_path = output_dir / self.model_ckpt
+        data_path = output_dir / (fname if fname else self.model_ckpt)
         torch.save(self.hess_approx, data_path)
-        LOG.info(f"Dumped Hessian matrix data at [bold purple]{data_path}[/bold purple]")
+        LOG.info(f"Dumped Hessian matrix data at {data_path}")
 
     def plot_matrix(self) -> None:
         raise NotImplementedError()

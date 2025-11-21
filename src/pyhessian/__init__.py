@@ -31,3 +31,5 @@ from .hessian import Hessian as Hessian
 from .density_plot import plot_eigenvalue_density as plot_eigenvalue_density
 from .hessian_plot import plot_hessian_heatmap as plot_hessian_heatmap
 from .hessian_plot import plot_hessian_sign as plot_hessian_sign
+
+from .approximate import HessianApproximator as HessianApproximator

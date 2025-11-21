@@ -110,6 +110,7 @@ class Hessian:
             # Forward pass and loss computation
             outputs = self.model(inputs)
             loss: Tensor = self.criterion(outputs, targets)
+            # TODO: check because gives warning on memory leak
             loss.backward(create_graph=True)  # Need graph for second-order derivatives
 
             # Get current parameters and gradients
