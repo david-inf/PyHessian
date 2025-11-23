@@ -51,8 +51,8 @@ def test_simple_approx():
     approximator = HessianApproximator(
         opts, hessian_comp, method_config=method
     )
-    hess_approx_out = approximator.run()
-    hess_approx = hess_approx_out['hess_approx']
+    approximator.run()
+    hess_approx = approximator.hess_approx_out['hess_approx']
     print(f"Hessian matrix shape: {hess_approx.shape}")
     print(f"  range: [{hess_approx.min().item():.4e}, {hess_approx.max().item():.4e}]")
     # # print(hess_approx)

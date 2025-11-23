@@ -48,6 +48,7 @@ class Hessian:
 
         # Set model to evaluation mode (disables dropout, batch norm training mode, etc.)
         self.model = model.eval()
+        # TODO: use a forward pass callable
         self.criterion = criterion
 
         # Store data source and set flag for computation method
@@ -108,6 +109,8 @@ class Hessian:
             tmp_num_data = inputs.size(0)  # batch size
 
             # Forward pass and loss computation
+            # TODO: wrap this into a callable that is passed to this object
+            # allows to handle custom loss functions
             outputs = self.model(inputs)
             loss: Tensor = self.criterion(outputs, targets)
             # TODO: check because gives warning on memory leak

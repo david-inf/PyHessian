@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 
 
-def plot_hessian_heatmap(hess_mat: torch.Tensor, ax: Optional[Axes]) -> Axes:
+def plot_hessian_heatmap(hess_mat: torch.Tensor, ax: Optional[Axes] = None) -> Axes:
     """Hessian matrix heatmap in log10 scale"""
     # Use log10 scale for intensities
     hess_log = torch.log10(hess_mat.squeeze(0).abs() + 1e-10).cpu().numpy()
@@ -25,7 +25,7 @@ def plot_hessian_heatmap(hess_mat: torch.Tensor, ax: Optional[Axes]) -> Axes:
     return ax
 
 
-def plot_hessian_sign(hess_mat: torch.Tensor, ax: Optional[Axes]) -> Axes:
+def plot_hessian_sign(hess_mat: torch.Tensor, ax: Optional[Axes] = None) -> Axes:
     """A binary plot that shows the sign of the entries"""
     # TODO: there might be problems with the max-pool, i.e. doesn't make much sense
     # TODO: maybe I can do an histogram, but I won't know where the values are located

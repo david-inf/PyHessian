@@ -4,6 +4,7 @@ from .hessian import Hessian
 from .utils import (
     AverageMeter, LOG, map_param_to_block_name, convert_sec_to_hms,
     hessian_vector_product)
+from .hessian_plot import plot_hessian_heatmap, plot_eigenvalue_density
 
 import time
 from argparse import Namespace
@@ -11,7 +12,10 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 import torch
 from torch import nn, Tensor
+import torch.nn.functional as F
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 
 
 def trainable_params(model: nn.Module):
@@ -28,7 +32,7 @@ class HessianApproximator:
         if getattr(opts, "ckpt", None) is None:
             raise ValueError("Model checkpoint not found in opts.ckpt")
 
-        self.model_ckpt = opts.ckpt
+        self.model_ckpt = opts.ckpt  # NOTE: can be annoying, ckpt must be loaded outside
         self.hessian_comp = hessian_comp
         self.method_config = method_config
 
@@ -47,7 +51,7 @@ class HessianApproximator:
         self.hess_approx_out: Optional[Dict[str, Any]] = None
 
     # TODO: improve type hints
-    def run(self) -> Dict[str, Any]:
+    def run(self) -> None:
         """Run the Hessian matrix approximation."""
         start = time.time()
 
@@ -71,7 +75,6 @@ class HessianApproximator:
 
         LOG.info(f"Hessian matrix approximation completed in "
                  f"{convert_sec_to_hms(time.time() - start)}")
-        return self.hess_approx_out
 
     def _block_wise_hessian(self) -> Dict[str, Tensor]:
         """Compute the Hessian matrix block-wise (for each param block in model)."""
@@ -120,6 +123,10 @@ class HessianApproximator:
             # TODO: handle params with requires_grad=False from beginning
             # for model_p_name, model_p in self.hessian_comp.model.named_parameters():
             #     model_p.requires_grad = True
+
+        # Reset, TODO: handle non-trainable from beginning
+        for p in self.hessian_comp.model.parameters():
+            p.requires_grad = True
 
         if hess_blocks is None:
             raise RuntimeError("Block Hessian matrices dict is empty :(")
@@ -206,8 +213,9 @@ class HessianApproximator:
 
     def export_matrix(self, output_dir: Optional[Path] = Path("."), fname: Optional[str] = None) -> None:
         """Export the computed matrix to a .pt file."""
-        if self.hess_approx is None:
-            raise ValueError("No Hessian matrix found at self.hess_approx")
+        hess_approx = self.hess_approx_out.get("hess_approx", None)
+        if hess_approx is None:
+            raise ValueError("No Hessian matrix found at self.hess_approx_out")
 
         LOG.debug(f"Checking directory {output_dir}")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -215,5 +223,67 @@ class HessianApproximator:
         torch.save(self.hess_approx, data_path)
         LOG.info(f"Dumped Hessian matrix data at {data_path}")
 
-    def plot_matrix(self) -> None:
-        raise NotImplementedError()
+    def plot_hessian(
+        self,
+        output_dir: Optional[Path] = Path("."),
+        fname: Optional[str] = None,
+        hess_data_path: Optional[Path] = None,
+        pooling: bool = True,  # TODO: use pooling_opts
+    ) -> None:
+        """Plot the Hessian matrix"""
+        # Input
+        if hess_data_path is None:
+            LOG.info("No Hessian data provided, loading the computed one...")
+            hess_approx = self.hess_approx_out.get("hess_approx", None)
+            if hess_approx is None:
+                raise ValueError("No Hessian matrix found at self.hess_approx_out")
+        else:
+            LOG.info("Hessian data provided, loading data...")
+            if not hess_data_path.is_file():
+                raise FileNotFoundError(
+                    f"Hessian matrix data not found at {hess_data_path}")
+            hess_approx = torch.load(hess_data_path, map_location="cpu")
+        LOG.info(f"Loaded Hessian with shape {hess_approx.size()}")
+
+        if pooling:
+            # TODO: provide opts
+            # opts.window
+            hess_approx = F.max_pool2d(hess_approx.unsqueeze(0), kernel_size=50)
+            LOG.info(f"Pooled Hessian to {hess_approx.size()}")
+
+        # Output
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if fname is None:
+            fname = self.model_ckpt
+
+        # Create figure with appropriate size and width ratios
+        axs: List[Axes]
+        fig, axs = plt.subplots(
+            1, 2, figsize=(12, 5), gridspec_kw={'width_ratios': [1, 1]}, 
+            layout='constrained'
+        )
+
+        # Hessian matrix heatmap
+        try:
+            plot_hessian_heatmap(hess_red, ax=axs[0])
+            LOG.info("Added Hessian heatmap")
+        except Exception as e:
+            print(e)
+        param_names = [name for name, p in hessian_comp.model.named_parameters() if p.requires_grad]
+        axs[0].set_title(Path(opts.ckpt).stem, fontsize=10, color="black", pad=8)
+        # Custom subtitle with parameter names
+        subtitle = ", ".join(param_names)
+        axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
+                    ha="center", va="bottom", fontsize=6, color="gray")
+
+        # Hessian eigen-spectrum
+        try:
+            density_eigen, density_weight = hessian_comp.density()
+            plot_eigenvalue_density(density_eigen, density_weight, ax=axs[1])
+            LOG.info("Added density plot")
+        except Exception as e:
+            print(e)
+        axs[1].set_title("Eigenvalue Density")
+
+        plt.savefig(output_dir / fname)
+        LOG.info(f"Plot of the computed Hessian and its density available at {path}")
