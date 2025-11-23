@@ -99,7 +99,7 @@ class Hessian:
         num_data = 0  # Accumulator for total number of data points processed
 
         # Initialize accumulator for Hessian-vector products (one tensor per parameter)
-        THv = [torch.zeros(p.size()).to(self.device) for p in self.params]
+        THv = [torch.zeros(p.size()).to(self.device) for p in self.params if p.requires_grad]
 
         # Iterate through all batches in the dataloader
         for inputs, targets in self.data:
@@ -116,7 +116,7 @@ class Hessian:
             # Get current parameters and gradients
             params, gradsH = get_params_grad(self.model)
             self.model.zero_grad()
-            
+
             # Compute Hessian-vector product using autograd
             # This computes ∇(∇L^T v) = H*v where H is the Hessian
             Hv = torch.autograd.grad(

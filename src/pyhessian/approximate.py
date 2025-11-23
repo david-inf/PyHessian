@@ -14,6 +14,10 @@ from torch import nn, Tensor
 from tqdm import tqdm
 
 
+def trainable_params(model: nn.Module):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 class HessianApproximator:
     def __init__(
         self,
@@ -37,76 +41,117 @@ class HessianApproximator:
             self.device = torch.device("cpu")
             LOG.warning("Hessian computation running on CPU, this may be slow.")
 
-        # Store there the computed matrix
-        self.hess_approx: Optional[Tensor] = None
+        # TODO: print here the model size
 
-    def run(self) -> Tensor:
+        # Store there the computed matrix
+        self.hess_approx_out: Optional[Dict[str, Any]] = None
+
+    # TODO: improve type hints
+    def run(self) -> Dict[str, Any]:
         """Run the Hessian matrix approximation."""
         start = time.time()
 
         method = self.method_config.get("method", "exact")
         LOG.info(f"Computing Hessian matrix with method {method}")
         if method == "exact":
-            self.hess_approx = self._exact_hessian()
+            self.hess_approx_out = self._exact_hessian()
         elif method == "block-wise":
-            raise NotImplementedError()
-            self.hess_approx = self._block_wise_hessian()
+            self.hess_approx_out = self._block_wise_hessian()
         elif method == "sampling":
             step = self.method_config.get("step", 10)
             LOG.info(f"Sampling every {step} parameters for Hessian approximation")
-            self.hess_approx = self._exact_hessian(step=step)
+            self.hess_approx_out = self._exact_hessian(step=step)
         else:
             raise ValueError(f"Unknown Hessian approximation method {method}")
 
-        if self.hess_approx is None:
+        if self.hess_approx_out is None:
             raise RuntimeError("Hessian approximation failed, no matrix computed.")
+        if self.hess_approx_out['hess_approx'] is None:
+            raise RuntimeError(f"Hessian approximation didn't return a key with Tensor, got {self.hess_approx_out}")
 
         LOG.info(f"Hessian matrix approximation completed in "
                  f"{convert_sec_to_hms(time.time() - start)}")
-        return self.hess_approx
+        return self.hess_approx_out
 
     def _block_wise_hessian(self) -> Dict[str, Tensor]:
         """Compute the Hessian matrix block-wise (for each param block in model)."""
         approx_start = time.time()
         mean_comp_time = AverageMeter()
 
+        # NOTE: do grad on all params
+        # TODO: handle non-trainable params from beginning?
+        for p in self.hessian_comp.model.parameters():
+            p.requires_grad = True
         # Cycle over the param blocks (pytorch default partition)
-        blocks = self.hessian_comp.model.named_parameters()
+        n_blocks = sum(1 for p in self.hessian_comp.model.parameters() if p.requires_grad)
+        block_names = [p_name for p_name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
+        LOG.info(f"Computing block-wise Hessian for {n_blocks} ({block_names}) blocks from {self.model_ckpt}!")
+
         hess_blocks: Dict[str, Tensor] = {}
         p: nn.Parameter
-        for i, (p_name, p) in enumerate(blocks, 1):
-            # do the exact approch for each block
+        for i, (p_name, p) in enumerate(self.hessian_comp.model.named_parameters(), 1):
+            # Freeze all model params except the current one
+            LOG.info(f"  [block {i}] Freezing model params except ones with {p_name} ({p.numel()} params)...")
+            # TODO: handle params with requires_grad=False from beginning
+            for model_p_name, model_p in self.hessian_comp.model.named_parameters():
+                if p_name not in model_p_name:
+                    # - params that aren't the current one
+                    # - params with or without grad will be set to False anyway
+                    model_p.requires_grad = False
+                else:
+                    # resets grad at each iteration
+                    model_p.requires_grad = True
+            LOG.info(f"  [block {i}] Trainable params: {trainable_params(self.hessian_comp.model)}")
+
+            # Launch the brute-force approach
             start = time.time()
-            # TODO: implement block-wise hessian
-            # block_hess_approx = self._exact_hessian([p])
-            # hess_blocks[p_name] = block_hess_approx
+            block_hess_approx_out = self._exact_hessian()
+            block_hess_approx = block_hess_approx_out['hess_approx']
+            hess_blocks[p_name] = block_hess_approx
             mean_comp_time.update(time.time() - start)
 
             approx_runtime = time.time() - approx_start
-            LOG.info(f"{self.model_ckpt}: {p_name} [{i}/{len(blocks)}]"
-                     f"{mean_comp_time.avg:.2f}s per block"
-                     f"{convert_sec_to_hms(approx_runtime)} current runtime")
+            LOG.info(f"  {p_name} [{i}/{n_blocks}] "
+                     f"{mean_comp_time.avg:.2f}s per block | "
+                     f"{convert_sec_to_hms(approx_runtime)} current runtime | "
+                     f"Hessian: {block_hess_approx.size()}")
+
+            # Reset requires grad (NOTE: we assume to do hess over all params)
+            # TODO: handle params with requires_grad=False from beginning
+            # for model_p_name, model_p in self.hessian_comp.model.named_parameters():
+            #     model_p.requires_grad = True
 
         if hess_blocks is None:
             raise RuntimeError("Block Hessian matrices dict is empty :(")
 
-        # TODO: otherwise a tensor with 1e-10 offdiagonal
-        return hess_blocks
+        LOG.info(f"Assembling block-diagonal Hessian with blocks {hess_blocks.keys()}")
+        hess_approx = torch.block_diag(*hess_blocks.values())
+        LOG.info(f"Hessian final shape {hess_approx.size()}")
+
+        hess_approx_out = {
+            "hess_approx": hess_approx,
+            "block_names": hess_blocks.keys()
+        }
+        return hess_approx_out
 
     def _exact_hessian(self, step: int = 1) -> Tensor:
-        """Compute the Hessian matrix for all the model parameters.
+        """Compute the Hessian matrix for all the model parameters. Brute-force.
         - If step is >1, will work as a sampling"""
         approx_start = time.time()
         log_every = self.method_config.get("log_every", 1000)
-        n_params = sum(p.numel() for p in self.hessian_comp.model.parameters() if p.requires_grad)
 
-        LOG.info(f"Computing full Hessian for {n_params} parameters!")
+        n_params = trainable_params(self.hessian_comp.model)
+        if n_params == 0:
+            raise ValueError(f"Number of params with grad is {n_params}")
+
+        LOG.info(f"Computing full Hessian for {n_params} params with grad!")
         LOG.info(f"This will require ~{(n_params**2 * 4) / (1024**3):.2f} GB of memory")
 
         mean_comp_time = AverageMeter()  # store here the average computation time
         hess_cols: List[Tensor] = []     # store here the columns of the Hessian
         hess_cols_names: List[str] = []  # store here the names of the Hessian columns
 
+        # Cycle over trainable params
         for i in tqdm(
             range(0, n_params, step),
             desc="Hv prods", unit="dim", disable=True
@@ -122,12 +167,16 @@ class HessianApproximator:
             e_i_shaped = []
             idx = 0
             # TODO: use somehow the param name
+            # Cycle over trainable param blocks
             p: nn.Parameter
             for p_name, p in self.hessian_comp.model.named_parameters():
-                # Cycle over param blocks
+                if not p.requires_grad:
+                    # n_params already considers params with grad
+                    # so we skip the params without grad
+                    continue
                 numel = p.numel()  # number of params in the current block
                 e_i_shaped.append(e_i[idx:idx+numel].reshape(p.shape))
-                idx += numel
+                idx += numel  # with non-trainable this will exceed e_i size
 
             # Compute the Hessian-vector product H * e_i -- delegate to pyhessian
             start = time.time()
@@ -143,14 +192,17 @@ class HessianApproximator:
             # Print status
             if i % log_every == 0:
                 approx_runtime = time.time() - approx_start
-                LOG.info(f"{self.model_ckpt}: {i}/{n_params} columns, "
+                LOG.info(f"{self.model_ckpt}: {i+1}/{n_params} columns, "
                          f"{mean_comp_time.avg:.2f}s per Hv product, "
                          f"{convert_sec_to_hms(approx_runtime)} current runtime")
                 mean_comp_time.reset()
 
         # Build the matrix
-        H_approx = torch.stack(hess_cols, dim=1)
-        return H_approx
+        hess_approx = torch.stack(hess_cols, dim=1)
+        hess_approx_out = {
+            "hess_approx": hess_approx
+        }
+        return hess_approx_out
 
     def export_matrix(self, output_dir: Optional[Path] = Path("."), fname: Optional[str] = None) -> None:
         """Export the computed matrix to a .pt file."""
