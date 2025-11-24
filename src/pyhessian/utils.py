@@ -44,8 +44,8 @@ console = Console(theme=monitor_theme)
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(message)s',
-    # datefmt='[%X]',
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M",
     handlers=[RichHandler(
         console=console,
         rich_tracebacks=True,

@@ -12,11 +12,16 @@ from torch.utils.data import DataLoader, TensorDataset
 def test_simple_approx():
     """A simple function to test code snippets."""
     torch.manual_seed(42)
+    opts = Namespace(**{
+        "ckpt": "init.pt",
+        "device": "cpu",
+    })
     model = nn.Sequential(
         nn.Linear(6, 4, bias=True),
         nn.ReLU(),
         nn.Linear(4, 2, bias=True)
     )
+    model = model.to(opts.device)
     model.eval()
     print(model)
     # for p_name, p in model.named_parameters():
@@ -34,20 +39,27 @@ def test_simple_approx():
     dataset = TensorDataset(data, target)
     dataloader = DataLoader(dataset, batch_size=2)
 
-    opts = Namespace(**{
-        "ckpt": "init.pt",
-        "device": "cpu",
-    })
+    def forward_pass(model, batch):
+        """Forward pass for toy model"""
+        device = next(model.parameters()).device
+        inputs, targets = batch
+        intputs, targets = inputs.to(device), targets.to(device)
+        outputs = model(inputs)
+        criterion = torch.nn.CrossEntropyLoss()
+        loss = criterion(outputs, targets)
+        return inputs.size(0), loss
+
     hessian_comp = Hessian(
         model,
-        criterion,
+        # criterion,
+        forward_pass,
         dataloader=dataloader,
         cuda=(opts.device == "cuda")
     )
 
-    # method = {"method": "exact", "log_every": 10}
+    method = {"method": "exact", "log_every": 10}
     # method = {"method": "sampling", "step": 2, "log_every": 1}
-    method = {"method": "block-wise", "log_every": 10}
+    # method = {"method": "block-wise", "log_every": 10}
     approximator = HessianApproximator(
         opts, hessian_comp, method_config=method
     )
@@ -55,8 +67,9 @@ def test_simple_approx():
     hess_approx = approximator.hess_approx_out['hess_approx']
     print(f"Hessian matrix shape: {hess_approx.shape}")
     print(f"  range: [{hess_approx.min().item():.4e}, {hess_approx.max().item():.4e}]")
-    # # print(hess_approx)
-    # approximator.export_matrix()
+
+    approximator.export_matrix()
+    approximator.plot_hessian(pooling=False)
 
 
 if __name__ == "__main__":

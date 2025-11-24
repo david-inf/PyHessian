@@ -2,9 +2,9 @@
 
 from .hessian import Hessian
 from .utils import (
-    AverageMeter, LOG, map_param_to_block_name, convert_sec_to_hms,
-    hessian_vector_product)
-from .hessian_plot import plot_hessian_heatmap, plot_eigenvalue_density
+    AverageMeter, LOG, map_param_to_block_name, convert_sec_to_hms)
+from .hessian_plot import plot_hessian_heatmap
+from .density_plot import plot_eigenvalue_density
 
 import time
 from argparse import Namespace
@@ -22,12 +22,19 @@ def trainable_params(model: nn.Module):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+"""TODO:
+- Check memory-efficiency
+- Parallelize for-loops
+"""
+
+
 class HessianApproximator:
     def __init__(
         self,
         opts: Namespace,
         hessian_comp: Hessian,
         method_config: Dict[str, Any],
+        plot_config: Optional[Dict[str, Any]] = None,
     ):
         if getattr(opts, "ckpt", None) is None:
             raise ValueError("Model checkpoint not found in opts.ckpt")
@@ -35,10 +42,11 @@ class HessianApproximator:
         self.model_ckpt = opts.ckpt  # NOTE: can be annoying, ckpt must be loaded outside
         self.hessian_comp = hessian_comp
         self.method_config = method_config
+        self.plot_config = plot_config
 
         # Device handling logic
         try:
-            self.device = hessian_comp.model.device
+            self.device = hessian_comp.device
             if self.device == torch.device("cpu"):
                 LOG.warning("Hessian computation running on CPU, this may be slow.")
         except AttributeError:
@@ -55,6 +63,7 @@ class HessianApproximator:
         """Run the Hessian matrix approximation."""
         start = time.time()
 
+        # TODO: would be better to parallelize the for loops
         method = self.method_config.get("method", "exact")
         LOG.info(f"Computing Hessian matrix with method {method}")
         if method == "exact":
@@ -75,36 +84,49 @@ class HessianApproximator:
 
         LOG.info(f"Hessian matrix approximation completed in "
                  f"{convert_sec_to_hms(time.time() - start)}")
+        # TODO: few matrix details here
 
-    def _block_wise_hessian(self) -> Dict[str, Tensor]:
+        # Dump matrix and plot it
+        self.export_matrix()
+        self.plot_hessian()
+
+    def _block_wise_hessian(self) -> Dict[str, Any]:
         """Compute the Hessian matrix block-wise (for each param block in model)."""
         approx_start = time.time()
         mean_comp_time = AverageMeter()
 
-        # NOTE: do grad on all params
-        # TODO: handle non-trainable params from beginning?
-        for p in self.hessian_comp.model.parameters():
-            p.requires_grad = True
-        # Cycle over the param blocks (pytorch default partition)
-        n_blocks = sum(1 for p in self.hessian_comp.model.parameters() if p.requires_grad)
-        block_names = [p_name for p_name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
-        LOG.info(f"Computing block-wise Hessian for {n_blocks} ({block_names}) blocks from {self.model_ckpt}!")
+        # Original params setting (will be reset at the end)
+        original_requires_grad = {
+            p_name: p.requires_grad
+            for p_name, p in self.hessian_comp.model.named_parameters()
+        }
+
+        # Blocks that needs Hessian computation
+        blocks_with_grad = [
+            p_name for p_name, p in self.hessian_comp.model.named_parameters()
+            if p.requires_grad
+        ]
+        n_blocks = len(blocks_with_grad)
+        if n_blocks == 0 or len(blocks_with_grad) == 0:
+            raise ValueError("No trainable parameters found for block-wise Hessian computation.")
+
+        LOG.info(f"Computing block-wise Hessian for {n_blocks} blocks from {self.model_ckpt}:")
+        LOG.info(blocks_with_grad)
 
         hess_blocks: Dict[str, Tensor] = {}
+        # Cycle over param blocks with grad
         p: nn.Parameter
-        for i, (p_name, p) in enumerate(self.hessian_comp.model.named_parameters(), 1):
+        for i, p_name in enumerate(blocks_with_grad, 1):
+            LOG.info(f"  [{p_name} {i}/{n_blocks}] Computing Hessian for param block {p_name}...")
+
             # Freeze all model params except the current one
-            LOG.info(f"  [block {i}] Freezing model params except ones with {p_name} ({p.numel()} params)...")
-            # TODO: handle params with requires_grad=False from beginning
             for model_p_name, model_p in self.hessian_comp.model.named_parameters():
-                if p_name not in model_p_name:
-                    # - params that aren't the current one
-                    # - params with or without grad will be set to False anyway
-                    model_p.requires_grad = False
-                else:
-                    # resets grad at each iteration
+                if model_p_name == p_name:
                     model_p.requires_grad = True
-            LOG.info(f"  [block {i}] Trainable params: {trainable_params(self.hessian_comp.model)}")
+                else:
+                    model_p.requires_grad = False
+
+            LOG.info(f"  [{p_name} {i}/{n_blocks}] Params with grad: {trainable_params(self.hessian_comp.model)}")
 
             # Launch the brute-force approach
             start = time.time()
@@ -114,19 +136,23 @@ class HessianApproximator:
             mean_comp_time.update(time.time() - start)
 
             approx_runtime = time.time() - approx_start
-            LOG.info(f"  {p_name} [{i}/{n_blocks}] "
+            LOG.info(f"  [{p_name} {i}/{n_blocks}] Computed block Hessian in "
                      f"{mean_comp_time.avg:.2f}s per block | "
                      f"{convert_sec_to_hms(approx_runtime)} current runtime | "
-                     f"Hessian: {block_hess_approx.size()}")
+                     f"Hessian ({p_name}): {block_hess_approx.size()}")
 
-            # Reset requires grad (NOTE: we assume to do hess over all params)
-            # TODO: handle params with requires_grad=False from beginning
-            # for model_p_name, model_p in self.hessian_comp.model.named_parameters():
-            #     model_p.requires_grad = True
+            # Dump partial Hessian (in case of job failure)
+            hess_approx = torch.block_diag(*hess_blocks.values())
+            self.hess_approx_out = {
+                "hess_approx": hess_approx,
+                "block_names": hess_blocks.keys()
+            }
+            self.export_matrix()
+            self.plot_hessian()
 
-        # Reset, TODO: handle non-trainable from beginning
-        for p in self.hessian_comp.model.parameters():
-            p.requires_grad = True
+        # Restore original requires_grad settings
+        for p_name, p in self.hessian_comp.model.named_parameters():
+            p.requires_grad = original_requires_grad[p_name]
 
         if hess_blocks is None:
             raise RuntimeError("Block Hessian matrices dict is empty :(")
@@ -211,27 +237,49 @@ class HessianApproximator:
         }
         return hess_approx_out
 
-    def export_matrix(self, output_dir: Optional[Path] = Path("."), fname: Optional[str] = None) -> None:
-        """Export the computed matrix to a .pt file."""
-        hess_approx = self.hess_approx_out.get("hess_approx", None)
+    def export_matrix(self) -> None:
+        """
+        Export the computed Hessian matrix to a .pt file.
+
+        Only the Hessian tensor (not the full dictionary) is saved using torch.save().
+        To reload, use torch.load(path), which will return the tensor as stored in self.hess_approx_out['hess_approx'].
+        If block-wise information or additional keys are needed, modify this method to save the full dictionary.
+        """
+        if self.hess_approx_out is None:
+            raise ValueError("No Hessian matrix found: self.hess_approx_out is None. Please run the approximation first.")
+
+        hess_approx: Optional[Tensor] = self.hess_approx_out.get("hess_approx", None)
         if hess_approx is None:
             raise ValueError("No Hessian matrix found at self.hess_approx_out")
 
-        LOG.debug(f"Checking directory {output_dir}")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        data_path = output_dir / (fname if fname else self.model_ckpt)
-        torch.save(self.hess_approx, data_path)
-        LOG.info(f"Dumped Hessian matrix data at {data_path}")
+        default_ckpt_name = self.model_ckpt
+        if not str(default_ckpt_name).endswith('.pt'):
+            default_ckpt_name = f"{default_ckpt_name}.pt"
+        output_path: Path = self.method_config.get("output_path", Path(".") / default_ckpt_name)
+        if not isinstance(output_path, Path):
+            output_path = Path(output_path)
+        LOG.info(f"Exporting Hessian matrix to {output_path}...")
+        LOG.info(f"  shape={hess_approx.size()}, dtype={hess_approx.dtype}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def plot_hessian(
-        self,
-        output_dir: Optional[Path] = Path("."),
-        fname: Optional[str] = None,
-        hess_data_path: Optional[Path] = None,
-        pooling: bool = True,  # TODO: use pooling_opts
-    ) -> None:
+        # TODO: dump the dict itself
+        torch.save(hess_approx, output_path)
+        file_size = output_path.stat().st_size / (1024 ** 2)  # size in MB
+        LOG.info(f"Dumped Hessian matrix data at {output_path} (size: {file_size:.2f} MB)")
+
+    def plot_hessian(self) -> None:
         """Plot the Hessian matrix"""
+        # Configs
+        if self.plot_config is None:
+            LOG.info("No plot config provided, using default settings.")
+            self.plot_config = {}
+        output_path = self.plot_config.get("output_path", f".{self.model_ckpt}.svg")
+        if not isinstance(output_path, Path):
+            output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Input
+        hess_data_path = self.plot_config.get("hess_data_path", None)
         if hess_data_path is None:
             LOG.info("No Hessian data provided, loading the computed one...")
             hess_approx = self.hess_approx_out.get("hess_approx", None)
@@ -245,16 +293,12 @@ class HessianApproximator:
             hess_approx = torch.load(hess_data_path, map_location="cpu")
         LOG.info(f"Loaded Hessian with shape {hess_approx.size()}")
 
+        pooling = self.plot_config.get("pooling", True)
         if pooling:
             # TODO: provide opts
             # opts.window
             hess_approx = F.max_pool2d(hess_approx.unsqueeze(0), kernel_size=50)
             LOG.info(f"Pooled Hessian to {hess_approx.size()}")
-
-        # Output
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if fname is None:
-            fname = self.model_ckpt
 
         # Create figure with appropriate size and width ratios
         axs: List[Axes]
@@ -265,12 +309,12 @@ class HessianApproximator:
 
         # Hessian matrix heatmap
         try:
-            plot_hessian_heatmap(hess_red, ax=axs[0])
+            plot_hessian_heatmap(hess_approx, ax=axs[0])
             LOG.info("Added Hessian heatmap")
         except Exception as e:
             print(e)
-        param_names = [name for name, p in hessian_comp.model.named_parameters() if p.requires_grad]
-        axs[0].set_title(Path(opts.ckpt).stem, fontsize=10, color="black", pad=8)
+        param_names = [name for name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
+        axs[0].set_title(Path(self.model_ckpt).stem, fontsize=10, color="black", pad=8)
         # Custom subtitle with parameter names
         subtitle = ", ".join(param_names)
         axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
@@ -278,12 +322,13 @@ class HessianApproximator:
 
         # Hessian eigen-spectrum
         try:
-            density_eigen, density_weight = hessian_comp.density()
+            density_eigen, density_weight = self.hessian_comp.density()
             plot_eigenvalue_density(density_eigen, density_weight, ax=axs[1])
             LOG.info("Added density plot")
         except Exception as e:
             print(e)
         axs[1].set_title("Eigenvalue Density")
 
-        plt.savefig(output_dir / fname)
-        LOG.info(f"Plot of the computed Hessian and its density available at {path}")
+        save_path = output_path.stem + ".svg"
+        plt.savefig(save_path)
+        LOG.info(f"Plot of the computed Hessian and its density available at {save_path}")

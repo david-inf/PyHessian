@@ -1,6 +1,7 @@
 """Core of the PyHessian package."""
 
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Any
+from collections.abc import Callable
 import torch
 from torch import nn, Tensor
 from torch.utils.data import DataLoader
@@ -22,25 +23,27 @@ class Hessian:
     def __init__(
         self,
         model: nn.Module,
-        criterion: nn.Module,
+        # criterion: nn.Module,
+        # pass a batch to this callable
+        # will output the batch size and the loss function value
+        forward_pass: Callable[[nn.Module, Any], Tuple[int, Tensor]],
         data: Optional[Tuple[Tensor, Tensor]] = None,
         dataloader: Optional[DataLoader] = None,
         cuda: bool = True
     ) -> None:
         """
         Initialize the Hessian computation class.
-        
+
         Args:
             model: The neural network model for which to compute Hessian information
             criterion: The loss function (e.g., nn.CrossEntropyLoss())
             data: A single batch of data as a tuple (inputs, targets). Mutually exclusive with dataloader
             dataloader: A DataLoader containing multiple batches. Mutually exclusive with data
             cuda: Whether to use CUDA for computation if available
-            
+
         Raises:
             AssertionError: If both data and dataloader are provided, or if neither is provided
         """
-
         # Ensure we either pass a single batch or a dataloader (mutually exclusive)
         assert (data is not None and dataloader is None) or (
             data is None and dataloader is not None
@@ -49,7 +52,8 @@ class Hessian:
         # Set model to evaluation mode (disables dropout, batch norm training mode, etc.)
         self.model = model.eval()
         # TODO: use a forward pass callable
-        self.criterion = criterion
+        # self.criterion = criterion
+        self.forward_pass = forward_pass
 
         # Store data source and set flag for computation method
         if data is not None:
@@ -63,18 +67,19 @@ class Hessian:
         self.device = 'cuda' if torch.cuda.is_available() and cuda else 'cpu'
 
         # Pre-processing for single batch case to simplify and optimize computation
-        if not self.full_dataset:
-            self.inputs, self.targets = self.data
-            # Move data to GPU if using CUDA
-            if self.device == 'cuda':
-                self.inputs, self.targets = self.inputs.cuda(
-                ), self.targets.cuda()
+        # NOTE: this won't work for batch coded differently, like with a dict
+        # if not self.full_dataset:
+        #     self.inputs, self.targets = self.data
+        #     # Move data to GPU if using CUDA
+        #     if self.device == 'cuda':
+        #         self.inputs, self.targets = self.inputs.cuda(
+        #         ), self.targets.cuda()
 
-            # For single batch, compute gradients once and reuse them
-            # create_graph=True allows computing second-order derivatives
-            outputs = self.model(self.inputs)
-            loss: Tensor = self.criterion(outputs, self.targets)
-            loss.backward(create_graph=True)
+        #     # For single batch, compute gradients once and reuse them
+        #     # create_graph=True allows computing second-order derivatives
+        #     outputs = self.model(self.inputs)
+        #     loss: Tensor = self.criterion(outputs, self.targets)
+        #     loss.backward(create_graph=True)
 
         # Extract model parameters and their gradients for Hessian computation
         params, gradsH = get_params_grad(self.model)  # a for loop over params
@@ -103,16 +108,20 @@ class Hessian:
         THv = [torch.zeros(p.size()).to(self.device) for p in self.params if p.requires_grad]
 
         # Iterate through all batches in the dataloader
-        for inputs, targets in self.data:
-            inputs, targets = inputs.to(self.device), targets.to(self.device)
+        # for inputs, targets in self.data:
+        for batch in self.data:
+            # inputs, targets = inputs.to(self.device), targets.to(self.device)
             self.model.zero_grad()
-            tmp_num_data = inputs.size(0)  # batch size
+            # tmp_num_data = inputs.size(0)  # batch size
 
             # Forward pass and loss computation
             # TODO: wrap this into a callable that is passed to this object
             # allows to handle custom loss functions
-            outputs = self.model(inputs)
-            loss: Tensor = self.criterion(outputs, targets)
+            # outputs = self.model(inputs)
+            # loss: Tensor = self.criterion(outputs, targets)
+            tmp_num_data: int
+            loss: Tensor
+            tmp_num_data, loss = self.forward_pass(self.model, batch)
             # TODO: check because gives warning on memory leak
             loss.backward(create_graph=True)  # Need graph for second-order derivatives
 
