@@ -25,6 +25,8 @@ from typing import Tuple, List, Dict, Union, TYPE_CHECKING
 import torch
 from torch import nn
 from torch import Tensor
+import numpy as np
+from numpy.typing import NDArray
 
 if TYPE_CHECKING:
     from .hessian import Hessian
@@ -233,6 +235,24 @@ def orthnormal(w: List[Tensor], v_list: List[List[Tensor]]) -> List[Tensor]:
         w = group_add(w, v, alpha=-group_product(w, v))
     # Normalize the resulting orthogonal vector
     return normalization(w)
+
+
+def condition_number(eigenvalues: NDArray[np.floating]) -> float:
+    """
+    Compute the condition number from a set of eigenvalues.
+    
+    The condition number is defined as the ratio of the largest to smallest
+    eigenvalue. It provides a measure of how well-conditioned a matrix is.
+    
+    Args:
+        eigenvalues: Array of eigenvalues (1D numpy array)
+
+    Returns:
+        The condition number (float)
+
+    """
+    # Compute the condition number as the ratio of max to min eigenvalue
+    return np.max(eigenvalues) / np.min(eigenvalues)
 
 
 def map_param_to_block_name(param_idx: int, hessian_comp: "Hessian") -> Dict[str, Union[str, List[int]]]:

@@ -20,6 +20,8 @@
 
 """Utilities for plotting eigenvalue density of Hessian matrices."""
 
+from .utils import condition_number
+
 from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
@@ -32,7 +34,8 @@ from matplotlib.axes import Axes
 def plot_eigenvalue_density(
     eigenvalues: NDArray[np.floating],
     weights: NDArray[np.floating],
-    ax: Optional[Axes] = None
+    ax: Optional[Axes] = None,
+    eigen_abs: bool = True
 ) -> Axes:
     """
     Plot the eigenvalue spectral density on a matplotlib Axes.
@@ -49,6 +52,7 @@ def plot_eigenvalue_density(
                 shape (n_runs, n_eigenvalues_per_run). These are typically the
                 squared first components of Lanczos eigenvectors
         ax: Matplotlib Axes object to plot on. If None, uses current axes (plt.gca())
+        eigen_abs: If True, plot density using absolute values of eigenvalues
         
     Returns:
         The Axes object with the density plot
@@ -60,22 +64,85 @@ def plot_eigenvalue_density(
         >>> plot_eigenvalue_density(eigenvalues, weights, ax=ax)
         >>> fig.savefig('eigenvalue_density.png')
     """
-    # Generate the density estimate from eigenvalues and weights
-    density, grids = density_generate(eigenvalues, weights)
+    # Ensure inputs are numpy arrays to avoid Python list/int comparison errors
+    # TODO: check pyhessian density method
+    eigenvalues = np.array(eigenvalues)
+    weights = np.array(weights)
+
+    # Compute fraction of positive eigenvalues robustly (works for 1D or 2D input)
+    ev_flat = eigenvalues.ravel()  # contiguous flattened array
+    if ev_flat.size == 0:
+        frac_pos = 0.0
+    else:
+        frac_pos = float(np.sum(ev_flat > 0)) / float(ev_flat.size)
+
+    # If requested, operate on absolute eigenvalues for density estimation
+    if eigen_abs:
+        eigenvalues_proc = np.abs(eigenvalues)
+    else:
+        eigenvalues_proc = eigenvalues
+
+    # density_generate expects shape (n_runs, n_eigenvalues_per_run). If a single
+    # run (1D array) was provided, expand dims so axis operations inside work.
+    if eigenvalues_proc.ndim == 1:
+        eigenvalues_for_density = eigenvalues_proc[np.newaxis, :]
+    else:
+        eigenvalues_for_density = eigenvalues_proc
+
+    if weights.ndim == 1:
+        weights_for_density = weights[np.newaxis, :]
+    else:
+        weights_for_density = weights
+
+    # Generate the density estimate from (possibly transformed) eigenvalues and weights
+    density, grids = density_generate(eigenvalues_for_density, weights_for_density)
+    assert density.shape == grids.shape, "Density and grid shapes do not match."
 
     if ax is None:
         ax = plt.gca()
 
-    # Plot with log scale on y-axis (add small epsilon to avoid log(0))
-    ax.semilogy(grids, density + 1e-10)
-    ax.set_ylabel('Density (Log Scale)', fontsize=14, labelpad=10)
-    ax.set_xlabel('Eigenvalue', fontsize=14, labelpad=10)
-    ax.tick_params(axis='both', which='major', labelsize=12)
+    # Small epsilon to avoid log(0) issues when using log scales
+    eps = 1e-12
 
-    # Set x-axis limits based on eigenvalue range with small padding
-    eig_min = np.min(eigenvalues)
-    eig_max = np.max(eigenvalues)
-    ax.set_xlim(eig_min - 1, eig_max + 1)
+    if eigen_abs:
+        # Only keep strictly positive grid points for log-scale x-axis
+        mask = grids > 0
+        grids_pos = grids[mask]
+        density_pos = density[mask]
+
+        if grids_pos.size == 0:
+            # Fallback: nothing positive in grid (very unusual). Plot entire density
+            grids_pos = grids
+            density_pos = density
+
+        # Clamp density to a tiny positive value to avoid log(0) or negative values
+        density_pos = np.maximum(density_pos, eps)
+
+        ax.plot(grids_pos, density_pos)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel('Absolute Eigenvalue (log scale)')
+        ax.set_ylabel('Density (log scale)')
+    else:
+        # For signed eigenvalues, show on semilogy to capture a wide dynamic range
+        ax.semilogy(grids, density + eps)
+        ax.set_xlabel('Eigenvalue')
+        ax.set_ylabel('Density (log scale)')
+        ax.tick_params(axis='both', which='major')
+
+        # Set x-axis limits based on original eigenvalue range with small padding
+        eig_min = np.min(eigenvalues)
+        eig_max = np.max(eigenvalues)
+        ax.set_xlim(eig_min - 1, eig_max + 1)
+
+    ax.grid(True, which='major', axis='x', linestyle='--', alpha=0.7)
+    ax.set_title('Eigenvalue Density')
+    # add condition number and fraction of positive eigenvalues to graph space
+    y_offset = 0.8
+    ax.annotate(f'p(lambd>0)={frac_pos:.2f}', xy=(0.05, y_offset + 0.07), xycoords='axes fraction',
+                fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
+    ax.annotate(f'cond={condition_number(eigenvalues):.2f}', xy=(0.05, y_offset), xycoords='axes fraction',
+                fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
 
     return ax
 

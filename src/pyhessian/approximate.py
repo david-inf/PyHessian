@@ -85,6 +85,10 @@ class HessianApproximator:
         LOG.info(f"Hessian matrix approximation completed in "
                  f"{convert_sec_to_hms(time.time() - start)}")
         # TODO: few matrix details here
+        LOG.info(f"  shape: {self.hess_approx_out['hess_approx'].size()}"
+                 f", dtype: {self.hess_approx_out['hess_approx'].dtype}"
+                 f", range: [{self.hess_approx_out['hess_approx'].min().item():.4e}, "
+                 f"{self.hess_approx_out['hess_approx'].max().item():.4e}]")
 
         # Dump matrix and plot it
         self.export_matrix()
@@ -110,6 +114,7 @@ class HessianApproximator:
         if n_blocks == 0 or len(blocks_with_grad) == 0:
             raise ValueError("No trainable parameters found for block-wise Hessian computation.")
 
+        LOG.info("="*20)
         LOG.info(f"Computing block-wise Hessian for {n_blocks} blocks from {self.model_ckpt}:")
         LOG.info(blocks_with_grad)
 
@@ -273,9 +278,12 @@ class HessianApproximator:
         if self.plot_config is None:
             LOG.info("No plot config provided, using default settings.")
             self.plot_config = {}
-        output_path = self.plot_config.get("output_path", f".{self.model_ckpt}.svg")
+        output_path = self.plot_config.get('output_path', f"./{self.model_ckpt}")
         if not isinstance(output_path, Path):
             output_path = Path(output_path)
+        # Replace extension with .svg while preserving the parent directory
+        # e.g. keep "some/dir/name.pt" -> "some/dir/name.svg"
+        output_path = output_path.with_suffix('.svg')
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Input
@@ -293,6 +301,7 @@ class HessianApproximator:
             hess_approx = torch.load(hess_data_path, map_location="cpu")
         LOG.info(f"Loaded Hessian with shape {hess_approx.size()}")
 
+        # TODO: if block-wise, I should pool the blocks alone
         pooling = self.plot_config.get("pooling", True)
         if pooling:
             # TODO: provide opts
@@ -310,25 +319,32 @@ class HessianApproximator:
         # Hessian matrix heatmap
         try:
             plot_hessian_heatmap(hess_approx, ax=axs[0])
+            param_names = [name for name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
+            # TODO: improve
+            axs[0].set_title(Path(self.model_ckpt).stem, fontsize=10, color="black", pad=8)
+            # Custom subtitle with parameter names
+            subtitle = ", ".join(param_names)
+            axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
+                        ha="center", va="bottom", fontsize=6, color="gray")
             LOG.info("Added Hessian heatmap")
         except Exception as e:
-            print(e)
-        param_names = [name for name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
-        axs[0].set_title(Path(self.model_ckpt).stem, fontsize=10, color="black", pad=8)
-        # Custom subtitle with parameter names
-        subtitle = ", ".join(param_names)
-        axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
-                    ha="center", va="bottom", fontsize=6, color="gray")
+            import traceback
+            LOG.info(e)
+            traceback.print_exc()
+
+        plt.savefig(output_path)
+        LOG.info(f"Partial plot available at {output_path}")
 
         # Hessian eigen-spectrum
         try:
+            # TODO: for some reasons is slow
             density_eigen, density_weight = self.hessian_comp.density()
-            plot_eigenvalue_density(density_eigen, density_weight, ax=axs[1])
+            plot_eigenvalue_density(density_eigen, density_weight, ax=axs[1], eigen_abs=True)
             LOG.info("Added density plot")
         except Exception as e:
-            print(e)
-        axs[1].set_title("Eigenvalue Density")
+            import traceback
+            LOG.info(e)
+            traceback.print_exc()
 
-        save_path = output_path.stem + ".svg"
-        plt.savefig(save_path)
-        LOG.info(f"Plot of the computed Hessian and its density available at {save_path}")
+        plt.savefig(output_path)
+        LOG.info(f"Plot of the computed Hessian and its density available at {output_path}")
