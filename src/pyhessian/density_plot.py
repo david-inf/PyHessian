@@ -22,6 +22,7 @@
 
 from .utils import condition_number
 
+import time
 from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
@@ -121,13 +122,13 @@ def plot_eigenvalue_density(
         ax.plot(grids_pos, density_pos)
         ax.set_xscale('log')
         ax.set_yscale('log')
-        ax.set_xlabel('Absolute Eigenvalue (log scale)')
-        ax.set_ylabel('Density (log scale)')
+        ax.set_xlabel(r'$\log_{10}$ Absolute Eigenvalue')
+        ax.set_ylabel(r'$\log_{10}$ Density')
     else:
         # For signed eigenvalues, show on semilogy to capture a wide dynamic range
         ax.semilogy(grids, density + eps)
         ax.set_xlabel('Eigenvalue')
-        ax.set_ylabel('Density (log scale)')
+        ax.set_ylabel(r'$\log_{10}$ Density')
         ax.tick_params(axis='both', which='major')
 
         # Set x-axis limits based on original eigenvalue range with small padding
@@ -139,9 +140,9 @@ def plot_eigenvalue_density(
     ax.set_title('Eigenvalue Density')
     # add condition number and fraction of positive eigenvalues to graph space
     y_offset = 0.8
-    ax.annotate(f'p(lambd>0)={frac_pos:.2f}', xy=(0.05, y_offset + 0.07), xycoords='axes fraction',
+    ax.annotate(f'p(lambd>0)={frac_pos:.2f}', xy=(0.05, y_offset + 0.06), xycoords='axes fraction',
                 fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
-    ax.annotate(f'cond={condition_number(eigenvalues):.2f}', xy=(0.05, y_offset), xycoords='axes fraction',
+    ax.annotate(f'cond={condition_number(eigenvalues):.2e}', xy=(0.05, y_offset), xycoords='axes fraction',
                 fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
 
     return ax

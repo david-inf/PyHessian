@@ -2,15 +2,21 @@
 
 from typing import Optional
 import torch
+from torch import Tensor
+import numpy as np
 from matplotlib.colors import ListedColormap
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 
 
-def plot_hessian_heatmap(hess_mat: torch.Tensor, ax: Optional[Axes] = None) -> Axes:
-    """Hessian matrix heatmap in log10 scale"""
+def plot_hessian_heatmap(hess_mat: Tensor, ax: Optional[Axes] = None) -> Axes:
+    """Hessian matrix heatmap in log10 scale
+    - hess_mat: 2D tensor of shape (N, N)
+    """
     # Use log10 scale for intensities
-    hess_log = torch.log10(hess_mat.squeeze(0).abs() + 1e-10).cpu().numpy()
+    hess_log = torch.log10(hess_mat.abs() + 1e-10).cpu().numpy()
+    assert isinstance(hess_log, np.ndarray), "Hessian matrix must be a numpy array"
+    assert hess_log.ndim == 2, "Hessian matrix must be 2D"
 
     if ax is None:
         ax = plt.gca()
@@ -20,7 +26,7 @@ def plot_hessian_heatmap(hess_mat: torch.Tensor, ax: Optional[Axes] = None) -> A
     ax.set_ylabel("Parameter Index")
     # Add legend for color scale
     cbar = plt.colorbar(img, ax=ax)
-    cbar.set_label(r'$\log_{10}(|H| + 10^{-10})$', rotation=270, labelpad=20)
+    cbar.set_label(r'$\log_{10}$ Hessian matrix', rotation=270, labelpad=20)
 
     return ax
 
@@ -34,6 +40,8 @@ def plot_hessian_sign(hess_mat: torch.Tensor, ax: Optional[Axes] = None) -> Axes
     # H_red = F.max_pool2d(hess_mat.unsqueeze(0), kernel_size=filter_size)
     # Apply the sign function
     hess_sign = hess_mat.squeeze(0).sign().cpu().numpy()
+    assert isinstance(hess_sign, np.ndarray), "Hessian matrix must be a numpy array"
+    assert hess_sign.ndim == 2, "Hessian matrix must be 2D"
 
     if ax is None:
         ax = plt.gca()

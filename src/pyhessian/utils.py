@@ -42,19 +42,32 @@ monitor_theme = Theme({
     "warning": "magenta",
     "error": "bold red",
 })
-console = Console(theme=monitor_theme)
+# Create a Console with a reasonable fixed width so log lines are wrapped
+# consistently and don't produce awkward breaks when captured to files.
+# soft_wrap=True helps preserve words when wrapping for file outputs.
+console = Console(theme=monitor_theme, width=120, soft_wrap=True)
+
+# Configure a RichHandler with a compact format. We disable markup to avoid
+# ANSI or markup artifacts when logs are redirected to files. We also hide
+# the repeated timestamp (omit_repeated_times) and prefer a short text
+# prefix (level name) to keep lines concise.
+rich_handler = RichHandler(
+    console=console,
+    rich_tracebacks=True,
+    markup=False,
+    show_time=False,
+    show_level=True,
+    omit_repeated_times=True,
+)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(message)s",
-    datefmt="%H:%M",
-    handlers=[RichHandler(
-        console=console,
-        rich_tracebacks=True,
-    )],
+    format="%(levelname)s: %(message)s",
+    handlers=[rich_handler],
 )
 
-LOG = logging.getLogger("rich")
+# Use a named logger for library messages
+LOG = logging.getLogger("pyhessian")
 
 
 def group_product(xs: List[Tensor], ys: List[Tensor]) -> Tensor:

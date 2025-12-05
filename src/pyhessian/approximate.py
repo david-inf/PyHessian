@@ -8,7 +8,7 @@ from .density_plot import plot_eigenvalue_density
 
 import time
 from argparse import Namespace
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any,  Tuple
 from pathlib import Path
 import torch
 from torch import nn, Tensor
@@ -24,7 +24,9 @@ def trainable_params(model: nn.Module):
 
 """TODO:
 - Check memory-efficiency
-- Parallelize for-loops
+  - Never hold the full matrix in memory
+- Block-wise:
+  - Create folders and dump here each block, then reconstruct on demand
 """
 
 
@@ -52,6 +54,7 @@ class HessianApproximator:
         except AttributeError:
             self.device = torch.device("cpu")
             LOG.warning("Hessian computation running on CPU, this may be slow.")
+        LOG.info(f"Computation will be on {self.device}")
 
         # TODO: print here the model size
 
@@ -59,7 +62,7 @@ class HessianApproximator:
         self.hess_approx_out: Optional[Dict[str, Any]] = None
 
     # TODO: improve type hints
-    def run(self) -> None:
+    def run(self, plot: bool = True) -> None:
         """Run the Hessian matrix approximation."""
         start = time.time()
 
@@ -92,7 +95,9 @@ class HessianApproximator:
 
         # Dump matrix and plot it
         self.export_matrix()
-        self.plot_hessian()
+        if plot:
+            LOG.info("Plotting Hessian matrix...")
+            self.plot_hessian()
 
     def _block_wise_hessian(self) -> Dict[str, Any]:
         """Compute the Hessian matrix block-wise (for each param block in model)."""
@@ -138,6 +143,10 @@ class HessianApproximator:
             block_hess_approx_out = self._exact_hessian()
             block_hess_approx = block_hess_approx_out['hess_approx']
             hess_blocks[p_name] = block_hess_approx
+            # TODO: need a way to clear memory after computing each block
+            # there's no space for keeping all blocks in memory
+            # this also applies when plotting the matrix
+            # need a way to do that without having the whole matrix in memory
             mean_comp_time.update(time.time() - start)
 
             approx_runtime = time.time() - approx_start
@@ -242,6 +251,17 @@ class HessianApproximator:
         }
         return hess_approx_out
 
+    def get_hessian_matrix(self) -> Tensor:
+        """Get the computed Hessian matrix."""
+        if self.hess_approx_out is None:
+            raise ValueError("No Hessian matrix found: self.hess_approx_out is None. Please run the approximation first.")
+
+        hess_approx: Optional[Tensor] = self.hess_approx_out.get("hess_approx", None)
+        if hess_approx is None:
+            raise ValueError("No Hessian matrix found at self.hess_approx_out")
+
+        return hess_approx
+
     def export_matrix(self) -> None:
         """
         Export the computed Hessian matrix to a .pt file.
@@ -250,12 +270,7 @@ class HessianApproximator:
         To reload, use torch.load(path), which will return the tensor as stored in self.hess_approx_out['hess_approx'].
         If block-wise information or additional keys are needed, modify this method to save the full dictionary.
         """
-        if self.hess_approx_out is None:
-            raise ValueError("No Hessian matrix found: self.hess_approx_out is None. Please run the approximation first.")
-
-        hess_approx: Optional[Tensor] = self.hess_approx_out.get("hess_approx", None)
-        if hess_approx is None:
-            raise ValueError("No Hessian matrix found at self.hess_approx_out")
+        hess_approx: Optional[Tensor] = self.get_hessian_matrix()
 
         default_ckpt_name = self.model_ckpt
         if not str(default_ckpt_name).endswith('.pt'):
@@ -272,12 +287,19 @@ class HessianApproximator:
         file_size = output_path.stat().st_size / (1024 ** 2)  # size in MB
         LOG.info(f"Dumped Hessian matrix data at {output_path} (size: {file_size:.2f} MB)")
 
-    def plot_hessian(self) -> None:
-        """Plot the Hessian matrix"""
+    def plot_hessian(self) -> Tuple[Axes, Axes, str]:
+        """Plot the Hessian matrix
+        
+        Returns:
+            Tuple[Axes, Axes, str]: The axes for the Hessian heatmap and
+            eigenvalue density plot, and the output path of the saved figure.
+        """
         # Configs
         if self.plot_config is None:
             LOG.info("No plot config provided, using default settings.")
             self.plot_config = {}
+        LOG.info(f"Plot config: {self.plot_config}")
+
         output_path = self.plot_config.get('output_path', f"./{self.model_ckpt}")
         if not isinstance(output_path, Path):
             output_path = Path(output_path)
@@ -287,10 +309,10 @@ class HessianApproximator:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Input
-        hess_data_path = self.plot_config.get("hess_data_path", None)
+        hess_data_path: Optional[Path] = self.plot_config.get("hess_data_path", None)
         if hess_data_path is None:
             LOG.info("No Hessian data provided, loading the computed one...")
-            hess_approx = self.hess_approx_out.get("hess_approx", None)
+            hess_approx: Optional[Tensor] = self.hess_approx_out.get("hess_approx", None)
             if hess_approx is None:
                 raise ValueError("No Hessian matrix found at self.hess_approx_out")
         else:
@@ -298,15 +320,20 @@ class HessianApproximator:
             if not hess_data_path.is_file():
                 raise FileNotFoundError(
                     f"Hessian matrix data not found at {hess_data_path}")
-            hess_approx = torch.load(hess_data_path, map_location="cpu")
+            hess_approx: Tensor = torch.load(hess_data_path, map_location="cpu")
+        # Add matrix to the class attribute
+        self.hess_approx_out = {"hess_approx": hess_approx}
         LOG.info(f"Loaded Hessian with shape {hess_approx.size()}")
 
         # TODO: if block-wise, I should pool the blocks alone
         pooling = self.plot_config.get("pooling", True)
         if pooling:
-            # TODO: provide opts
-            # opts.window
-            hess_approx = F.max_pool2d(hess_approx.unsqueeze(0), kernel_size=50)
+            filter_size = self.plot_config.get("filter_size", 50)
+            # Pooling is applied to reduce the resolution of the Hessian matrix for visualization.
+            # Reshape Hessian to 4D for pooling: (N=1, C=1, H, W)
+            hess_approx_4d = hess_approx.unsqueeze(0).unsqueeze(0)
+            hess_approx_pooled = F.max_pool2d(hess_approx_4d, kernel_size=filter_size)
+            hess_approx = hess_approx_pooled.squeeze(0).squeeze(0)  # Restore 2D
             LOG.info(f"Pooled Hessian to {hess_approx.size()}")
 
         # Create figure with appropriate size and width ratios
@@ -319,13 +346,13 @@ class HessianApproximator:
         # Hessian matrix heatmap
         try:
             plot_hessian_heatmap(hess_approx, ax=axs[0])
-            param_names = [name for name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
             # TODO: improve
             axs[0].set_title(Path(self.model_ckpt).stem, fontsize=10, color="black", pad=8)
             # Custom subtitle with parameter names
-            subtitle = ", ".join(param_names)
-            axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
-                        ha="center", va="bottom", fontsize=6, color="gray")
+            # param_names = [name for name, p in self.hessian_comp.model.named_parameters() if p.requires_grad]
+            # subtitle = ", ".join(param_names)
+            # axs[0].text(0.5, 0.99, subtitle, transform=axs[0].transAxes,
+            #             ha="center", va="bottom", fontsize=6, color="gray")
             LOG.info("Added Hessian heatmap")
         except Exception as e:
             import traceback
@@ -348,3 +375,5 @@ class HessianApproximator:
 
         plt.savefig(output_path)
         LOG.info(f"Plot of the computed Hessian and its density available at {output_path}")
+
+        return axs[0], axs[1], output_path
