@@ -70,13 +70,6 @@ def plot_eigenvalue_density(
     eigenvalues = np.array(eigenvalues)
     weights = np.array(weights)
 
-    # Compute fraction of positive eigenvalues robustly (works for 1D or 2D input)
-    ev_flat = eigenvalues.ravel()  # contiguous flattened array
-    if ev_flat.size == 0:
-        frac_pos = 0.0
-    else:
-        frac_pos = float(np.sum(ev_flat > 0)) / float(ev_flat.size)
-
     # If requested, operate on absolute eigenvalues for density estimation
     if eigen_abs:
         eigenvalues_proc = np.abs(eigenvalues)
@@ -138,12 +131,6 @@ def plot_eigenvalue_density(
 
     ax.grid(True, which='major', axis='x', linestyle='--', alpha=0.7)
     ax.set_title('Eigenvalue Density')
-    # add condition number and fraction of positive eigenvalues to graph space
-    y_offset = 0.8
-    ax.annotate(f'p(lambd>0)={frac_pos:.2f}', xy=(0.05, y_offset + 0.06), xycoords='axes fraction',
-                fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
-    ax.annotate(f'cond={condition_number(eigenvalues):.2e}', xy=(0.05, y_offset), xycoords='axes fraction',
-                fontsize=10, ha='left', va='top', bbox=dict(boxstyle='round,pad=0.3', edgecolor='black', facecolor='white'))
 
     return ax
 
